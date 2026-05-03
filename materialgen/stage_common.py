@@ -6,6 +6,7 @@ from pathlib import Path
 
 INVERSE_STAGE_DIR = "train_neat"
 BNN_STAGE_DIR = "make_neat_to_bnn"
+GAN_STAGE_DIR = "train_gan"
 
 
 @dataclass(frozen=True)
@@ -15,6 +16,12 @@ class ArtifactsLayout:
     root: Path
     inverse_dir: Path
     bnn_dir: Path
+    gan_artifacts: Path = None
+
+    def __post_init__(self):
+        """Set default gan_artifacts if not provided."""
+        if self.gan_artifacts is None:
+            object.__setattr__(self, 'gan_artifacts', self.root / GAN_STAGE_DIR)
 
 
 def ensure_dir(path: str | Path) -> Path:
@@ -30,6 +37,7 @@ def resolve_artifacts_layout(
     *,
     inverse_dir: str | Path | None = None,
     bnn_dir: str | Path | None = None,
+    gan_dir: str | Path | None = None,
 ) -> ArtifactsLayout:
     """Resolve the canonical artifacts folders used by the stage pipeline."""
 
@@ -38,6 +46,7 @@ def resolve_artifacts_layout(
         root=root,
         inverse_dir=ensure_dir(inverse_dir or root / INVERSE_STAGE_DIR),
         bnn_dir=ensure_dir(bnn_dir or root / BNN_STAGE_DIR),
+        gan_artifacts=ensure_dir(gan_dir or root / GAN_STAGE_DIR),
     )
 
 

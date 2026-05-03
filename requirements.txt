@@ -5,3 +5,4 @@ pyro-ppl>=1.9
 neat-python>=0.92
 matplotlib>=3.7
 Pillow>=10.0
+cloudpickle>=3.0

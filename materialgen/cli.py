@@ -6,6 +6,7 @@ from pathlib import Path
 
 from .make_neat_to_bnn import run_make_neat_to_bnn
 from .train_neat import run_train_neat
+from .train_gan import run_train_gan
 
 
 def _write_payload(payload: str, output_path: str | None) -> None:
@@ -42,6 +43,16 @@ def _build_parser() -> argparse.ArgumentParser:
     bnn_parser.add_argument("--bnn-dir", default=None, help="Optional override for the make_neat_to_bnn artifacts folder")
     bnn_parser.add_argument("--output", default=None, help="Optional path for JSON summary")
 
+    gan_parser = subparsers.add_parser(
+        "train_gan",
+        help="Train GAN discriminator for validation of realism of predictions",
+    )
+    gan_parser.add_argument("--config", required=True, help="Path to train_gan.json")
+    gan_parser.add_argument("--artifacts-dir", default="artifacts", help="Root directory for all stage artifacts")
+    gan_parser.add_argument("--bnn-dir", default=None, help="Optional override for the BNN artifacts folder")
+    gan_parser.add_argument("--gan-dir", default=None, help="Optional override for the train_gan artifacts folder")
+    gan_parser.add_argument("--output", default=None, help="Optional path for JSON summary")
+
     return parser
 
 
@@ -66,6 +77,17 @@ def _handle_make_neat_to_bnn(args) -> int:
     return 0
 
 
+def _handle_train_gan(args) -> int:
+    summary = run_train_gan(
+        config_path=args.config,
+        artifacts_dir=args.artifacts_dir,
+        bnn_dir=args.bnn_dir,
+        gan_dir=args.gan_dir,
+    )
+    _write_payload(json.dumps(summary, ensure_ascii=False, indent=2), args.output)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
@@ -73,6 +95,7 @@ def main(argv: list[str] | None = None) -> int:
     handlers = {
         "train_neat": _handle_train_neat,
         "make_neat_to_bnn": _handle_make_neat_to_bnn,
+        "train_gan": _handle_train_gan,
     }
     handler = handlers.get(args.command)
     if handler is None:

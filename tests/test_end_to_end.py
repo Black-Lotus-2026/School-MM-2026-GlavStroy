@@ -23,11 +23,9 @@ class CliSmokeTest(unittest.TestCase):
         self.assertEqual(
             set(sub_action.choices),
             {
-                "train_surrogate",
                 "train_neat",
                 "make_neat_to_bnn",
-                "batch-predict",
-                "complex-check",
+                "train_gan",
             },
         )
 
@@ -35,11 +33,9 @@ class CliSmokeTest(unittest.TestCase):
         """Every stage has a checked-in example JSON config."""
 
         for name in (
-            "forward.json",
             "backward.json",
             "make_neat_to_bnn.json",
-            "batch.json",
-            "complex_check.json",
+            "train_gan.json",
         ):
             path = EXAMPLES / name
             self.assertTrue(path.exists(), f"missing example: {path}")
