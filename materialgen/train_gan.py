@@ -1,32 +1,28 @@
-"""Стадия 4 — обучение GAN для проверки реалистичности предсказаний.
+"""Стадия 4 — дискриминатор «реальные пары vs NEAT-BNN».
 
-Генератор (обученная BNN) предсказывает прочность по составу.
-Дискриминатор (новая Bayesian BNN) проверяет реалистичность предсказаний.
-
-GAN обучается на паре: реальные данные vs синтетические (предсказания BNN).
+Обученная NEAT→BNN модель задаёт **генератор** в смысле GAN: по целевым
+свойствам (прочность и т.д.) предсказывает состав смеси. Замороженная BNN
+сравнивается с реальными парами (состав, свойства); дискриминатор учится
+отличать реальные записи от предсказаний BNN.
 """
 from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
-
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader, TensorDataset
 
+from pyro.nn import PyroModule, PyroSample
 import pyro
 import pyro.distributions as dist
-from pyro.nn import PyroModule, PyroSample
 
 from .config import DatasetInputConfig, OptimizerConfig, _resolve_config_path
 from .data import prepare_dataset
-from .scaler import StandardScaler
+from .neat_bnn import NeatBNNRegressor
 from .stage_common import resolve_artifacts_layout, write_json
-from .visualization import write_fitness_history_plot
 
 
 # =============================================================================
@@ -65,6 +61,10 @@ class GANStageConfig:
     label_smoothing: float = 0.0
     
     neat_config_path: str | None = None
+    # Loaded from ``artifacts/make_neat_to_bnn`` by default
+    bnn_model_filename: str = "bnn_model.pt"
+    generator_mc_samples: int = 30
+    random_seed: int | None = None
 
     @property
     def component_columns(self) -> list[str]:
@@ -103,6 +103,9 @@ class GANStageConfig:
             "generator_steps_per_epoch", "gradient_penalty_weight",
             "use_focal_loss", "focal_loss_gamma", "label_smoothing",
             "neat_config_path",
+            "bnn_model_filename",
+            "generator_mc_samples",
+            "random_seed",
         ]:
             if key in payload:
                 gan_params[key] = payload[key]
@@ -122,6 +125,10 @@ class GANStageConfig:
             raise ValueError("num_epochs must be >= 1")
         if self.batch_size < 1:
             raise ValueError("batch_size must be >= 1")
+        if self.generator_mc_samples < 1:
+            raise ValueError("generator_mc_samples must be >= 1")
+        if not str(self.bnn_model_filename).strip():
+            raise ValueError("bnn_model_filename must not be empty")
 
     def to_dict(self) -> dict:
         """Serialize to JSON."""
@@ -144,7 +151,27 @@ class GANStageConfig:
             "use_focal_loss": self.use_focal_loss,
             "focal_loss_gamma": self.focal_loss_gamma,
             "label_smoothing": self.label_smoothing,
+            "bnn_model_filename": self.bnn_model_filename,
+            "generator_mc_samples": self.generator_mc_samples,
+            "random_seed": self.random_seed,
         }
+
+
+def _alignment_check(manifest: dict, dataset: DatasetInputConfig) -> None:
+    """BNN manifest column order must match the GAN dataset block exactly."""
+
+    mi = list(manifest.get("input_names", []))
+    mo = list(manifest.get("output_names", []))
+    if mi != list(dataset.properties):
+        raise ValueError(
+            "GAN dataset.properties must match make_neat_to_bnn manifest input_names "
+            f"(same order): manifest={mi}, config={list(dataset.properties)}"
+        )
+    if mo != list(dataset.components):
+        raise ValueError(
+            "GAN dataset.components must match make_neat_to_bnn manifest output_names "
+            f"(same order): manifest={mo}, config={list(dataset.components)}"
+        )
 
 
 # =============================================================================
@@ -285,13 +312,7 @@ class GANTrainer:
             betas=(0.5, 0.999),
         )
 
-        # History
-        self.history = {
-            "d_loss": [],
-            "g_loss": [],
-            "accuracy_real": [],
-            "accuracy_fake": [],
-        }
+        self.history: dict[str, list[float]] = {}
 
     def _apply_constraints(self, components: torch.Tensor) -> torch.Tensor:
         """Clip components to valid bounds."""
@@ -441,43 +462,57 @@ def run_train_gan(
     bnn_dir: str | Path | None = None,
     gan_dir: str | Path | None = None,
 ) -> dict:
-    """Train GAN discriminator for realism validation.
-    
-    Args:
-        config_path: Path to GAN config JSON
-        artifacts_dir: Root artifacts directory
-        bnn_dir: Override for BNN artifacts location
-        gan_dir: Override for GAN artifacts location
-        
-    Returns:
-        Summary dictionary
-    """
-    
+    """Train a discriminator that separates real (composition, property) pairs from BNN predictions."""
+
     config = load_gan_config(config_path)
-    
-    # Resolve artifact directories
+
     layout = resolve_artifacts_layout(
         artifacts_dir=artifacts_dir,
         inverse_dir=None,
         bnn_dir=bnn_dir,
         gan_dir=gan_dir,
     )
-    
+
     gan_artifacts = layout.gan_artifacts
     gan_artifacts.mkdir(parents=True, exist_ok=True)
 
-    # Load dataset
+    manifest_path = layout.bnn_dir / "bnn_model_manifest.json"
+    if not manifest_path.exists():
+        raise FileNotFoundError(
+            f"Missing BNN manifest {manifest_path}. Run make_neat_to_bnn before train_gan."
+        )
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    _alignment_check(manifest, config.dataset)
+
+    model_path = layout.bnn_dir / config.bnn_model_filename
+    if not model_path.exists():
+        raise FileNotFoundError(
+            f"Missing trained BNN checkpoint {model_path}. Run make_neat_to_bnn first."
+        )
+
+    regressor = NeatBNNRegressor.load(model_path)
+
     dataset = prepare_dataset(
         csv_path=config.dataset.data_path,
         component_columns=config.dataset.components,
         property_columns=config.dataset.properties,
     )
 
-    # Split data
+    seed = config.random_seed
+    if seed is None:
+        seed = config.discriminator_config.seed
+    if seed is None:
+        seed = 42
+    rng = np.random.default_rng(int(seed))
+
     n_samples = len(dataset.components)
     n_train = int(0.8 * n_samples)
-    
-    indices = np.random.permutation(n_samples)
+    if n_train < 1 or n_train >= n_samples:
+        raise ValueError(
+            f"Need at least 2 rows for train/val split; got n_samples={n_samples}"
+        )
+
+    indices = rng.permutation(n_samples)
     train_idx = indices[:n_train]
     val_idx = indices[n_train:]
 
@@ -486,55 +521,64 @@ def run_train_gan(
     val_components = dataset.components[val_idx]
     val_properties = dataset.properties[val_idx]
 
-    # Normalize properties
-    scaler = StandardScaler.fit(train_properties)
-    train_properties_scaled = scaler.transform(train_properties)
-    val_properties_scaled = scaler.transform(val_properties)
+    bounds_lower = np.array(
+        [dataset.component_bounds[name][0] for name in config.dataset.components],
+        dtype=float,
+    )
+    bounds_upper = np.array(
+        [dataset.component_bounds[name][1] for name in config.dataset.components],
+        dtype=float,
+    )
 
-    # Create dummy generator function (in real implementation, load trained BNN)
-    def generator_fn(properties_scaled: torch.Tensor) -> torch.Tensor:
-        """Dummy generator - in production, use trained BNN."""
-        batch_size = properties_scaled.shape[0]
-        n_components = train_components.shape[1]
-        return torch.rand(batch_size, n_components)
-
-    # Create trainer
     device = "cuda" if torch.cuda.is_available() else "cpu"
+    mc_samples = max(1, int(config.generator_mc_samples))
+
+    def generator_fn(properties_tensor: torch.Tensor) -> torch.Tensor:
+        props = properties_tensor.detach().cpu().numpy()
+        mean, _ = regressor.predict_components(props, mc_samples=mc_samples)
+        return torch.from_numpy(np.asarray(mean, dtype=np.float32)).to(device)
+
     trainer = GANTrainer(
         generator_fn=generator_fn,
-        component_bounds_lower=np.array([bounds[0] for bounds in dataset.component_bounds.values()]),
-        component_bounds_upper=np.array([bounds[1] for bounds in dataset.component_bounds.values()]),
+        component_bounds_lower=bounds_lower,
+        component_bounds_upper=bounds_upper,
         config=config,
         device=device,
     )
 
-    # Train GAN
+    log_every = max(1, config.num_epochs // 10)
+
     for epoch in range(config.num_epochs):
-        metrics = trainer.train_epoch(train_components, train_properties_scaled)
-        
-        if (epoch + 1) % 10 == 0:
-            val_metrics = trainer.evaluate(val_components, val_properties_scaled)
-            print(f"Epoch {epoch+1}: D_loss={metrics['d_loss']:.4f}, "
-                  f"Acc_real={metrics['acc_real']:.4f}, Acc_fake={metrics['acc_fake']:.4f}")
+        metrics = trainer.train_epoch(train_components, train_properties)
+
+        if (epoch + 1) % log_every == 0 or epoch == config.num_epochs - 1:
+            val_metrics = trainer.evaluate(val_components, val_properties)
+            print(
+                f"Epoch {epoch + 1}/{config.num_epochs}: D_loss={metrics['d_loss']:.4f}, "
+                f"Acc_real={metrics['acc_real']:.4f}, Acc_fake={metrics['acc_fake']:.4f} | "
+                f"val D_loss={val_metrics['d_loss']:.4f}"
+            )
 
         for key, value in metrics.items():
-            if key not in trainer.history:
-                trainer.history[key] = []
-            trainer.history[key].append(value)
+            trainer.history.setdefault(key, []).append(float(value))
 
-    # Save model
     torch.save(trainer.discriminator.state_dict(), gan_artifacts / "discriminator.pt")
-    
-    # Save scaler
-    write_json(gan_artifacts / "scaler.json", scaler.to_dict())
 
-    # Save history
+    write_json(
+        gan_artifacts / "gan_generator_meta.json",
+        {
+            "bnn_checkpoint": str(model_path.resolve()),
+            "generator_mc_samples": mc_samples,
+            "manifest": str(manifest_path.resolve()),
+        },
+    )
     write_json(gan_artifacts / "history.json", trainer.history)
 
-    # Create summary
     summary = {
         "status": "success",
         "num_epochs": config.num_epochs,
+        "bnn_model": str(model_path),
+        "random_seed": int(seed),
         "final_d_loss": float(trainer.history["d_loss"][-1]),
         "final_acc_real": float(trainer.history["acc_real"][-1]),
         "final_acc_fake": float(trainer.history["acc_fake"][-1]),
