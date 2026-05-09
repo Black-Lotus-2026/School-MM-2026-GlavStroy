@@ -90,3 +90,5 @@
 4. **`evaluate_metrics`** — MAE, RMSE, MAPE, R² по отложенной доле данных для сохранённой BNN (`examples/evaluate_metrics.json`).
 
 Образец табличных данных для локальных прогонов: `data/synthetic_training_data.csv`. Установка зависимостей: `pip install -r requirements.txt`. Запуск из корня репозитория: `python main.py <команда> --config examples/....json`.
+
+Чтобы выполнить все четыре стадии подряд без ручного копирования команд: `python main_work.py` (см. `main_work.py`).
