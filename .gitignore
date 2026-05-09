@@ -219,6 +219,9 @@ __marimo__/
 
 data/*
 !data/synthetic_training_data.csv
+!data/Normal_Concrete_DB.csv
+!data/boxcrete_data.csv
+!data/ГОСТы.csv
 .idea
 llm_reports
 artifacts
