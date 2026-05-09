@@ -22,6 +22,7 @@ import pyro.distributions as dist
 from .config import DatasetInputConfig, OptimizerConfig, _resolve_config_path
 from .data import prepare_dataset
 from .neat_bnn import NeatBNNRegressor
+from .scaler import StandardScaler
 from .stage_common import resolve_artifacts_layout, write_json
 
 
@@ -289,11 +290,19 @@ class GANTrainer:
         component_bounds_lower: np.ndarray,
         component_bounds_upper: np.ndarray,
         config: GANStageConfig,
+        input_scaler: StandardScaler | None = None,
         device: str = "cuda" if torch.cuda.is_available() else "cpu",
     ):
         self.generator_fn = generator_fn
         self.component_bounds_lower = torch.from_numpy(component_bounds_lower).float().to(device)
         self.component_bounds_upper = torch.from_numpy(component_bounds_upper).float().to(device)
+        self.input_scaler = input_scaler
+        if input_scaler is not None:
+            self._scaler_mean = torch.from_numpy(np.asarray(input_scaler.mean, dtype=np.float32)).to(device)
+            self._scaler_scale = torch.from_numpy(np.asarray(input_scaler.scale, dtype=np.float32)).to(device)
+        else:
+            self._scaler_mean = None
+            self._scaler_scale = None
         self.config = config
         self.device = device
 
@@ -317,6 +326,12 @@ class GANTrainer:
     def _apply_constraints(self, components: torch.Tensor) -> torch.Tensor:
         """Clip components to valid bounds."""
         return torch.clamp(components, self.component_bounds_lower, self.component_bounds_upper)
+
+    def _scale_input(self, combined: torch.Tensor) -> torch.Tensor:
+        """Standardize discriminator input (components, properties) so BCELoss does not saturate."""
+        if self._scaler_mean is None:
+            return combined
+        return (combined - self._scaler_mean) / self._scaler_scale
 
     def _compute_focal_loss(
         self,
@@ -403,9 +418,9 @@ class GANTrainer:
                 batch_fake = self.generator_fn(batch_props)
                 batch_fake = self._apply_constraints(batch_fake)
 
-            # Combine: [components, properties]
-            real_combined = torch.cat([batch_real, batch_props], dim=1)
-            fake_combined = torch.cat([batch_fake, batch_props], dim=1)
+            # Combine and standardize: [components, properties]
+            real_combined = self._scale_input(torch.cat([batch_real, batch_props], dim=1))
+            fake_combined = self._scale_input(torch.cat([batch_fake, batch_props], dim=1))
 
             # Train discriminator
             self.d_optimizer.zero_grad()
@@ -434,8 +449,8 @@ class GANTrainer:
             fake_data = self.generator_fn(properties)
             fake_data = self._apply_constraints(fake_data)
 
-            real_combined = torch.cat([real_data, properties], dim=1)
-            fake_combined = torch.cat([fake_data, properties], dim=1)
+            real_combined = self._scale_input(torch.cat([real_data, properties], dim=1))
+            fake_combined = self._scale_input(torch.cat([fake_data, properties], dim=1))
 
             _, metrics = self._compute_discriminator_loss(real_combined, fake_combined)
 
@@ -533,6 +548,11 @@ def run_train_gan(
     device = "cuda" if torch.cuda.is_available() else "cpu"
     mc_samples = max(1, int(config.generator_mc_samples))
 
+    # Standardize discriminator input on the train fold so BCELoss does not
+    # saturate (compositions ~1e2-1e3 kg/m^3, strength ~1e1 MPa).
+    train_real_combined = np.concatenate([train_components, train_properties], axis=1)
+    input_scaler = StandardScaler.fit(train_real_combined)
+
     def generator_fn(properties_tensor: torch.Tensor) -> torch.Tensor:
         props = properties_tensor.detach().cpu().numpy()
         mean, _ = regressor.predict_components(props, mc_samples=mc_samples)
@@ -543,6 +563,7 @@ def run_train_gan(
         component_bounds_lower=bounds_lower,
         component_bounds_upper=bounds_upper,
         config=config,
+        input_scaler=input_scaler,
         device=device,
     )
 
@@ -564,12 +585,14 @@ def run_train_gan(
 
     torch.save(trainer.discriminator.state_dict(), gan_artifacts / "discriminator.pt")
 
+    write_json(gan_artifacts / "input_scaler.json", input_scaler.to_dict())
     write_json(
         gan_artifacts / "gan_generator_meta.json",
         {
             "bnn_checkpoint": str(model_path.resolve()),
             "generator_mc_samples": mc_samples,
             "manifest": str(manifest_path.resolve()),
+            "input_scaler": "input_scaler.json",
         },
     )
     write_json(gan_artifacts / "history.json", trainer.history)
