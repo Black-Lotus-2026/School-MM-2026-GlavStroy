@@ -217,7 +217,8 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 
-data
+data/*
+!data/synthetic_training_data.csv
 .idea
 llm_reports
 artifacts
