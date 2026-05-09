@@ -1,0 +1,11 @@
+{
+  "model_path": "../artifacts/make_neat_to_bnn/bnn_model.pt",
+  "dataset": {
+    "data_path": "../data/synthetic_training_data.csv",
+    "components": ["cement", "sand", "gravel", "water"],
+    "properties": ["strength_28"]
+  },
+  "validation_split": 0.25,
+  "mc_samples": 24,
+  "random_seed": 42
+}

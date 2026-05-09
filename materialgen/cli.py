@@ -4,6 +4,7 @@ import argparse
 import json
 from pathlib import Path
 
+from .evaluate_metrics import run_evaluate_metrics
 from .make_neat_to_bnn import run_make_neat_to_bnn
 from .train_neat import run_train_neat
 from .train_gan import run_train_gan
@@ -53,6 +54,13 @@ def _build_parser() -> argparse.ArgumentParser:
     gan_parser.add_argument("--gan-dir", default=None, help="Optional override for the train_gan artifacts folder")
     gan_parser.add_argument("--output", default=None, help="Optional path for JSON summary")
 
+    eval_parser = subparsers.add_parser(
+        "evaluate_metrics",
+        help="MAE / RMSE / MAPE / R² for a trained BNN on a held-out data slice",
+    )
+    eval_parser.add_argument("--config", required=True, help="Path to evaluate_metrics.json")
+    eval_parser.add_argument("--output", default=None, help="Optional path for JSON summary")
+
     return parser
 
 
@@ -88,6 +96,12 @@ def _handle_train_gan(args) -> int:
     return 0
 
 
+def _handle_evaluate_metrics(args) -> int:
+    summary = run_evaluate_metrics(config_path=args.config)
+    _write_payload(json.dumps(summary, ensure_ascii=False, indent=2), args.output)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
@@ -96,6 +110,7 @@ def main(argv: list[str] | None = None) -> int:
         "train_neat": _handle_train_neat,
         "make_neat_to_bnn": _handle_make_neat_to_bnn,
         "train_gan": _handle_train_gan,
+        "evaluate_metrics": _handle_evaluate_metrics,
     }
     handler = handlers.get(args.command)
     if handler is None:
