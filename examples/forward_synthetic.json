@@ -1,0 +1,22 @@
+{
+  "dataset": {
+    "data_path": "../data/synthetic_training_data.csv",
+    "components": [
+      "cement", "sand", "gravel", "water",
+      "plasticizer_kg", "fly_ash", "microsilica_kg",
+      "pm", "kmv", "mineral_powder", "mineral_additive",
+      "dolomite", "ak5", "ak6"
+    ],
+    "properties": ["strength_1", "strength_3", "strength_7", "strength_28"]
+  },
+  "hidden_layers": [64, 32],
+  "prior_std": 1.0,
+  "learning_rate": 0.005,
+  "epochs": 400,
+  "batch_size": 16,
+  "validation_split": 0.2,
+  "early_stopping_rounds": 60,
+  "mc_samples": 16,
+  "eval_mc_samples": 64,
+  "seed": 42
+}

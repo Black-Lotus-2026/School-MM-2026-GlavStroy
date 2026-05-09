@@ -15,6 +15,7 @@ from typing import Any
 __all__ = [
     "run_evaluate_metrics",
     "run_make_neat_to_bnn",
+    "run_train_forward",
     "run_train_gan",
     "run_train_neat",
 ]
@@ -22,6 +23,7 @@ __all__ = [
 _LAZY = {
     "run_evaluate_metrics": ("evaluate_metrics", "run_evaluate_metrics"),
     "run_make_neat_to_bnn": ("make_neat_to_bnn", "run_make_neat_to_bnn"),
+    "run_train_forward": ("train_forward", "run_train_forward"),
     "run_train_gan": ("train_gan", "run_train_gan"),
     "run_train_neat": ("train_neat", "run_train_neat"),
 }

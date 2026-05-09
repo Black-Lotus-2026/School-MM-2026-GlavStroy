@@ -6,6 +6,7 @@ from pathlib import Path
 
 from .evaluate_metrics import run_evaluate_metrics
 from .make_neat_to_bnn import run_make_neat_to_bnn
+from .train_forward import run_train_forward
 from .train_neat import run_train_neat
 from .train_gan import run_train_gan
 
@@ -61,6 +62,15 @@ def _build_parser() -> argparse.ArgumentParser:
     eval_parser.add_argument("--config", required=True, help="Path to evaluate_metrics.json")
     eval_parser.add_argument("--output", default=None, help="Optional path for JSON summary")
 
+    fwd_parser = subparsers.add_parser(
+        "train_forward",
+        help="Train a forward Bayesian MLP (composition → properties) and report metrics",
+    )
+    fwd_parser.add_argument("--config", required=True, help="Path to forward.json")
+    fwd_parser.add_argument("--artifacts-dir", default="artifacts", help="Root artifacts directory")
+    fwd_parser.add_argument("--forward-dir", default=None, help="Optional override for the train_forward folder")
+    fwd_parser.add_argument("--output", default=None, help="Optional path for JSON summary")
+
     return parser
 
 
@@ -102,6 +112,16 @@ def _handle_evaluate_metrics(args) -> int:
     return 0
 
 
+def _handle_train_forward(args) -> int:
+    summary = run_train_forward(
+        config_path=args.config,
+        artifacts_dir=args.artifacts_dir,
+        forward_dir=args.forward_dir,
+    )
+    _write_payload(json.dumps(summary, ensure_ascii=False, indent=2), args.output)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
@@ -111,6 +131,7 @@ def main(argv: list[str] | None = None) -> int:
         "make_neat_to_bnn": _handle_make_neat_to_bnn,
         "train_gan": _handle_train_gan,
         "evaluate_metrics": _handle_evaluate_metrics,
+        "train_forward": _handle_train_forward,
     }
     handler = handlers.get(args.command)
     if handler is None:
