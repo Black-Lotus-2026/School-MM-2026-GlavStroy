@@ -18,12 +18,19 @@ class PreparedDataset:
     property_ranges: dict[str, dict[str, float]]
 
 
-def read_dataset_frame(csv_path: str | Path) -> pd.DataFrame:
+def read_dataset_frame(csv_path: str | Path, skiprows: int = 0) -> pd.DataFrame:
     """Load a CSV into a DataFrame with pandas' delimiter inference."""
 
     path = Path(csv_path)
     try:
-        frame = pd.read_csv(path, sep=None, engine="python", skipinitialspace=True, decimal=",")
+        frame = pd.read_csv(
+            path,
+            sep=None,
+            engine="python",
+            skipinitialspace=True,
+            decimal=",",
+            skiprows=int(skiprows),
+        )
     except pd.errors.EmptyDataError as exc:
         raise ValueError(f"Dataset {csv_path} is empty") from exc
 
@@ -33,14 +40,29 @@ def read_dataset_frame(csv_path: str | Path) -> pd.DataFrame:
 
 
 def _select_numeric_columns(frame: pd.DataFrame, columns: list[str], csv_path: str | Path) -> pd.DataFrame:
-    """Select columns from the DataFrame and coerce them to numeric values."""
+    """Select columns from the DataFrame and coerce them to numeric values.
+
+    Handles thousands separator (space, e.g. ``"1 013,00"``) and decimal commas.
+    """
 
     missing_columns = [name for name in columns if name not in frame.columns]
     if missing_columns:
         names = ", ".join(repr(name) for name in missing_columns)
         raise KeyError(f"Columns {names} not found in {csv_path}")
 
-    numeric = frame.loc[:, columns].apply(pd.to_numeric, errors="coerce")
+    raw = frame.loc[:, columns].copy()
+    for col in columns:
+        if not pd.api.types.is_numeric_dtype(raw[col]):
+            cleaned = (
+                raw[col]
+                .astype(str)
+                .str.replace("\u00a0", "", regex=False)
+                .str.replace(" ", "", regex=False)
+                .str.replace(",", ".", regex=False)
+            )
+            raw[col] = cleaned
+
+    numeric = raw.apply(pd.to_numeric, errors="coerce")
     invalid_mask = numeric.isna()
     if invalid_mask.any().any():
         row_position, column_position = next(zip(*np.where(invalid_mask.to_numpy())))
@@ -56,6 +78,7 @@ def prepare_dataset(
     property_columns: list[str],
     component_aliases: dict[str, str] | None = None,
     min_time: float | None = None,
+    skiprows: int = 0,
 ) -> PreparedDataset:
     """Load the training CSV and compute matrices plus dataset-driven ranges.
 
@@ -64,7 +87,7 @@ def prepare_dataset(
     is ``{csv_column_name: canonical_name}``.
     """
 
-    frame = read_dataset_frame(csv_path)
+    frame = read_dataset_frame(csv_path, skiprows=skiprows)
     if component_aliases:
         frame = frame.rename(columns=component_aliases)
     if min_time is not None:

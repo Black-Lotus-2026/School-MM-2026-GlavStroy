@@ -9,14 +9,14 @@
     ],
     "properties": ["strength_1", "strength_3", "strength_7", "strength_28"]
   },
-  "hidden_layers": [64, 32],
-  "prior_std": 1.0,
-  "learning_rate": 0.005,
-  "epochs": 400,
+  "hidden_layers": [32, 16],
+  "prior_std": 0.3,
+  "learning_rate": 0.002,
+  "epochs": 600,
   "batch_size": 16,
   "validation_split": 0.2,
-  "early_stopping_rounds": 60,
-  "mc_samples": 16,
+  "early_stopping_rounds": 80,
+  "mc_samples": 32,
   "eval_mc_samples": 64,
   "seed": 42
 }

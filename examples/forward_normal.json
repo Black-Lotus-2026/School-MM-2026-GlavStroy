@@ -1,0 +1,29 @@
+{
+  "dataset": {
+    "data_path": "../data/Normal_Concrete_DB.csv",
+    "skiprows": 2,
+    "components": [
+      "Цемент (кг/м³)",
+      "Шлак BFS (кг/м³)",
+      "Зола-унос (кг/м³)",
+      "Микрокремнезём (кг/м³)",
+      "Вода (кг/м³)",
+      "Суперпластификатор (кг/м³)",
+      "ЩебеньКрупный заполнитель (кг/м³)",
+      "Песок Мелкий заполнитель (кг/м³)",
+      "Возраст (дней)"
+    ],
+    "properties": ["Прочность CS_28d (МПа)  ← ТАРГЕТ 2"]
+  },
+  "hidden_layers": [64, 32],
+  "prior_std": 0.3,
+  "learning_rate": 0.003,
+  "epochs": 2500,
+  "batch_size": 128,
+  "validation_split": 0.2,
+  "early_stopping_rounds": 250,
+  "mc_samples": 16,
+  "eval_mc_samples": 64,
+  "kl_weight": 0.005,
+  "seed": 42
+}

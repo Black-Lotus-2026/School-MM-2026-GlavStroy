@@ -38,6 +38,7 @@ class ForwardStageConfig:
     mc_samples: int = 30
     eval_mc_samples: int = 50
     seed: int = 42
+    kl_weight: float = 1.0
     pretrained_model_path: str | None = None
 
     @classmethod
@@ -55,6 +56,7 @@ class ForwardStageConfig:
             mc_samples=int(payload.get("mc_samples", 30)),
             eval_mc_samples=int(payload.get("eval_mc_samples", 50)),
             seed=int(payload.get("seed", 42)),
+            kl_weight=float(payload.get("kl_weight", 1.0)),
             pretrained_model_path=payload.get("pretrained_model_path"),
         )
 
@@ -88,6 +90,7 @@ class ForwardStageConfig:
             "mc_samples": self.mc_samples,
             "eval_mc_samples": self.eval_mc_samples,
             "seed": self.seed,
+            "kl_weight": self.kl_weight,
             "pretrained_model_path": self.pretrained_model_path,
         }
 
@@ -131,6 +134,8 @@ def run_train_forward(
         csv_path=config.dataset.data_path,
         component_columns=config.dataset.components,
         property_columns=config.dataset.properties,
+        component_aliases=config.dataset.component_aliases,
+        skiprows=config.dataset.skiprows,
     )
 
     x = np.asarray(dataset.components, dtype=np.float32)
@@ -154,12 +159,14 @@ def run_train_forward(
                 f"expected input={x.shape[1]}, output={y.shape[1]}"
             )
     else:
+        likelihood_scale = 1.0 / max(config.kl_weight, 1e-8)
         regressor = ForwardBNNRegressor(
             input_dim=x.shape[1],
             output_dim=y.shape[1],
             hidden_layers=list(config.hidden_layers),
             prior_std=config.prior_std,
             seed=config.seed,
+            likelihood_scale=likelihood_scale,
         )
 
     training_result = regressor.fit(

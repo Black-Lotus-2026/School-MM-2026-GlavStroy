@@ -22,6 +22,8 @@ class DatasetInputConfig:
     data_path: str
     components: list[str]
     properties: list[str]
+    skiprows: int = 0
+    component_aliases: dict[str, str] | None = None
 
     @classmethod
     def from_dict(
@@ -47,6 +49,8 @@ class DatasetInputConfig:
             data_path=str(data_path),
             components=[str(name) for name in components],
             properties=[str(name) for name in properties],
+            skiprows=int(payload.get("skiprows", 0)),
+            component_aliases=payload.get("component_aliases"),
         )
 
     def resolve_paths(self, base_dir: Path) -> None:
@@ -68,11 +72,16 @@ class DatasetInputConfig:
     def to_dict(self) -> dict:
         """Serialize the dataset block into plain JSON-compatible values."""
 
-        return {
+        payload: dict = {
             "data_path": self.data_path,
             "components": self.components,
             "properties": self.properties,
         }
+        if self.skiprows:
+            payload["skiprows"] = self.skiprows
+        if self.component_aliases:
+            payload["component_aliases"] = self.component_aliases
+        return payload
 
 
 @dataclass

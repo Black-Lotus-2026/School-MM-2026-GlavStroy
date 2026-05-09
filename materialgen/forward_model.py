@@ -26,7 +26,14 @@ from .scaler import StandardScaler
 
 
 class ForwardBayesianMLP(PyroModule):
-    """Bayesian MLP with Gaussian prior on every weight and bias."""
+    """Bayesian MLP with Gaussian prior on every weight and bias.
+
+    Observation noise ``sigma`` is a learnable Pyro parameter (not sampled) for
+    stable convergence on medium-sized regression datasets. The ELBO can be
+    re-balanced via ``likelihood_scale``: values > 1 amplify the data term so
+    the KL on weights becomes comparatively weaker (useful when the dataset is
+    small relative to the network capacity).
+    """
 
     def __init__(
         self,
@@ -34,12 +41,14 @@ class ForwardBayesianMLP(PyroModule):
         output_dim: int,
         hidden_layers: list[int],
         prior_std: float = 1.0,
+        likelihood_scale: float = 1.0,
     ) -> None:
         super().__init__()
         self.input_dim = int(input_dim)
         self.output_dim = int(output_dim)
         self.hidden_layers = list(hidden_layers)
         self.prior_std = float(prior_std)
+        self.likelihood_scale = float(likelihood_scale)
 
         modules: list[nn.Module] = []
         prev = self.input_dim
@@ -67,17 +76,19 @@ class ForwardBayesianMLP(PyroModule):
         self.network = PyroModule[nn.Sequential](*modules)
 
     def forward(self, x: torch.Tensor, y: torch.Tensor | None = None) -> torch.Tensor:
-        sigma = pyro.sample(
-            "sigma",
-            dist.HalfNormal(1.0).expand([self.output_dim]).to_event(1),
+        log_sigma = pyro.param(
+            "log_sigma",
+            torch.full((self.output_dim,), -1.0),
         )
+        sigma = log_sigma.exp().clamp(min=1e-3)
         mean = self.network(x)
         with pyro.plate("data", x.shape[0]):
-            pyro.sample(
-                "obs",
-                dist.Normal(mean, sigma).to_event(1),
-                obs=y,
-            )
+            with pyro.poutine.scale(scale=self.likelihood_scale):
+                pyro.sample(
+                    "obs",
+                    dist.Normal(mean, sigma).to_event(1),
+                    obs=y,
+                )
         return mean
 
 
@@ -90,6 +101,7 @@ class ForwardBNNRegressor:
     hidden_layers: list[int]
     prior_std: float = 1.0
     seed: int = 42
+    likelihood_scale: float = 1.0
 
     def __post_init__(self) -> None:
         torch.manual_seed(self.seed)
@@ -98,6 +110,7 @@ class ForwardBNNRegressor:
             output_dim=self.output_dim,
             hidden_layers=self.hidden_layers,
             prior_std=self.prior_std,
+            likelihood_scale=self.likelihood_scale,
         )
         self.guide = AutoNormal(self.model)
         self.x_scaler: StandardScaler | None = None
@@ -142,7 +155,12 @@ class ForwardBNNRegressor:
 
         pyro.clear_param_store()
         optim = pyro.optim.Adam({"lr": float(learning_rate)})
-        svi = SVI(self.model, self.guide, optim, loss=Trace_ELBO())
+        svi = SVI(
+            self.model,
+            self.guide,
+            optim,
+            loss=Trace_ELBO(num_particles=2),
+        )
 
         best_val = float("inf")
         best_state: Any = None
@@ -229,6 +247,7 @@ class ForwardBNNRegressor:
                 "hidden_layers": self.hidden_layers,
                 "prior_std": self.prior_std,
                 "seed": self.seed,
+                "likelihood_scale": self.likelihood_scale,
                 "x_scaler": self.x_scaler.to_dict(),
                 "y_scaler": self.y_scaler.to_dict(),
                 "param_store_state": pyro.get_param_store().get_state(),
@@ -245,6 +264,7 @@ class ForwardBNNRegressor:
             hidden_layers=list(ckpt["hidden_layers"]),
             prior_std=float(ckpt["prior_std"]),
             seed=int(ckpt.get("seed", 42)),
+            likelihood_scale=float(ckpt.get("likelihood_scale", 1.0)),
         )
         regressor.x_scaler = StandardScaler.from_dict(ckpt["x_scaler"])
         regressor.y_scaler = StandardScaler.from_dict(ckpt["y_scaler"])
