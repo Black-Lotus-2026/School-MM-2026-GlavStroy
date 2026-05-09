@@ -15,7 +15,7 @@ EXAMPLES = REPO_ROOT / "examples"
 
 class CliSmokeTest(unittest.TestCase):
     def test_all_subcommands_register(self) -> None:
-        """The CLI exposes the five pipeline stages."""
+        """The CLI exposes all pipeline commands."""
 
         parser = _build_parser()
         # argparse stores subcommands in the choices of the subparsers action.
@@ -26,16 +26,18 @@ class CliSmokeTest(unittest.TestCase):
                 "train_neat",
                 "make_neat_to_bnn",
                 "train_gan",
+                "evaluate_metrics",
             },
         )
 
     def test_each_stage_has_example_config(self) -> None:
-        """Every stage has a checked-in example JSON config."""
+        """Checked-in example JSON exists for each CLI command."""
 
         for name in (
             "backward.json",
             "make_neat_to_bnn.json",
             "train_gan.json",
+            "evaluate_metrics.json",
         ):
             path = EXAMPLES / name
             self.assertTrue(path.exists(), f"missing example: {path}")
