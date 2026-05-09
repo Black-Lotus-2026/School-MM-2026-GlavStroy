@@ -1,4 +1,5 @@
 {
+  "generator_mode": "inverse",
   "dataset": {
     "data_path": "../data/synthetic_training_data.csv",
     "components": ["cement", "sand", "gravel", "water"],

@@ -88,7 +88,7 @@
 
 1. **`train_neat`** — обратная NEAT: свойства → состав смеси (`examples/backward.json`).
 2. **`make_neat_to_bnn`** — конвертация генома NEAT в байесовскую сеть и дообучение (`examples/make_neat_to_bnn.json`), сохранение `bnn_model.pt` и манифеста.
-3. **`train_gan`** — дискриминатор отличает реальные пары *(состав, свойства)* от предсказаний замороженной BNN (`examples/train_gan.json`). Колонки в конфиге должны совпадать по порядку с манифестом стадии 2→3.
+3. **`train_gan`** — дискриминатор отличает реальные пары *(состав, свойства)* от подделок замороженного генератора. Режим **`generator_mode: "inverse"`** (по умолчанию в `examples/train_gan.json`): генератор — NEAT→BNN, подделка *(предсказанный состав, истинные свойства)* по отношению к *(истинный состав, истинные свойства)* — для цепочки A. Режим **`generator_mode: "forward"`** (`examples/train_gan_forward.json`, как в формулировке ТЗ): генератор — байесовский forward MLP после `train_forward`, подделка *(истинный состав, предсказанные свойства)*; нужен файл `artifacts/train_forward/forward_bnn.pt`.
 4. **`evaluate_metrics`** — MAE, RMSE, MAPE, R² по отложенной доле данных для сохранённой BNN (`examples/evaluate_metrics.json`).
 
 ### B. Прямая ветка (состав → прочность, основной полезный сигнал)
@@ -103,7 +103,8 @@
 ```bash
 python main.py train_neat        --config examples/backward.json
 python main.py make_neat_to_bnn  --config examples/make_neat_to_bnn.json
-python main.py train_gan         --config examples/train_gan.json
+python main.py train_gan         --config examples/train_gan.json           # генератор inverse (NEAT→BNN)
+python main.py train_gan         --config examples/train_gan_forward.json    # генератор состав→прочность (ТЗ); сначала train_forward
 python main.py evaluate_metrics  --config examples/evaluate_metrics.json
 python main.py train_forward     --config examples/forward_normal.json
 python main.py validate_gost     --config examples/validate_gost.json

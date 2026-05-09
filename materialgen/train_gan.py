@@ -1,9 +1,12 @@
-"""Стадия 4 — дискриминатор «реальные пары vs NEAT-BNN».
+"""Stage 4 — GAN discriminator: real (composition, properties) pairs vs frozen generator.
 
-Обученная NEAT→BNN модель задаёт **генератор** в смысле GAN: по целевым
-свойствам (прочность и т.д.) предсказывает состав смеси. Замороженная BNN
-сравнивается с реальными парами (состав, свойства); дискриминатор учится
-отличать реальные записи от предсказаний BNN.
+Поддерживается два режима, задаваемые ``generator_mode`` в JSON:
+
+- ``forward`` (формулировка ТЗ): **генератор** — обученный forward Bayesian MLP,
+  который по составу предсказывает свойства (прочность и т.д.). Дискриминатор
+  учится отличать реальные пары *[x, y]* от пар *[x, ŷ]*, где ŷ — выход генератора.
+- ``inverse`` (исторический / NEAT-пайплайн): генератор — NEAT→BNN, свойства→состав;
+  подделки — *[ẋ, y]* против реальных *[x, y]* при тех же целевых свойствах *y*.
 """
 from __future__ import annotations
 
@@ -21,6 +24,7 @@ import pyro.distributions as dist
 
 from .config import DatasetInputConfig, OptimizerConfig, _resolve_config_path
 from .data import prepare_dataset
+from .forward_model import ForwardBNNRegressor
 from .neat_bnn import NeatBNNRegressor
 from .scaler import StandardScaler
 from .stage_common import resolve_artifacts_layout, write_json
@@ -62,8 +66,12 @@ class GANStageConfig:
     label_smoothing: float = 0.0
     
     neat_config_path: str | None = None
-    # Loaded from ``artifacts/make_neat_to_bnn`` by default
+    # Inverse mode only: checkpoint under artifacts/make_neat_to_bnn
     bnn_model_filename: str = "bnn_model.pt"
+    # "forward" = composition→properties (задание). "inverse" = NEAT-BNN свойства→состав.
+    generator_mode: str = "inverse"
+    # Forward mode only: checkpoint from train_forward (e.g. artifacts/train_forward/forward_bnn.pt)
+    forward_model_path: str | None = None
     generator_mc_samples: int = 30
     random_seed: int | None = None
 
@@ -105,6 +113,8 @@ class GANStageConfig:
             "use_focal_loss", "focal_loss_gamma", "label_smoothing",
             "neat_config_path",
             "bnn_model_filename",
+            "generator_mode",
+            "forward_model_path",
             "generator_mc_samples",
             "random_seed",
         ]:
@@ -118,18 +128,31 @@ class GANStageConfig:
         self.dataset.resolve_paths(base_dir)
         resolved = _resolve_config_path(base_dir, self.neat_config_path)
         self.neat_config_path = resolved
+        if self.forward_model_path:
+            fp = _resolve_config_path(base_dir, self.forward_model_path)
+            self.forward_model_path = fp
 
     def validate(self) -> None:
         """Validate configuration."""
         self.dataset.validate("dataset")
+        mode = str(self.generator_mode).strip().lower()
+        if mode not in {"inverse", "forward"}:
+            raise ValueError("generator_mode must be 'inverse' or 'forward'")
+        self.generator_mode = mode
         if self.num_epochs < 1:
             raise ValueError("num_epochs must be >= 1")
         if self.batch_size < 1:
             raise ValueError("batch_size must be >= 1")
         if self.generator_mc_samples < 1:
             raise ValueError("generator_mc_samples must be >= 1")
-        if not str(self.bnn_model_filename).strip():
-            raise ValueError("bnn_model_filename must not be empty")
+        if mode == "inverse":
+            if not str(self.bnn_model_filename).strip():
+                raise ValueError("bnn_model_filename must not be empty in inverse generator_mode")
+        else:
+            if not self.forward_model_path or not str(self.forward_model_path).strip():
+                raise ValueError(
+                    "forward_model_path is required when generator_mode is 'forward'"
+                )
 
     def to_dict(self) -> dict:
         """Serialize to JSON."""
@@ -153,6 +176,8 @@ class GANStageConfig:
             "focal_loss_gamma": self.focal_loss_gamma,
             "label_smoothing": self.label_smoothing,
             "bnn_model_filename": self.bnn_model_filename,
+            "generator_mode": self.generator_mode,
+            "forward_model_path": self.forward_model_path,
             "generator_mc_samples": self.generator_mc_samples,
             "random_seed": self.random_seed,
         }
@@ -172,6 +197,22 @@ def _alignment_check(manifest: dict, dataset: DatasetInputConfig) -> None:
         raise ValueError(
             "GAN dataset.components must match make_neat_to_bnn manifest output_names "
             f"(same order): manifest={mo}, config={list(dataset.components)}"
+        )
+
+
+def _forward_dim_check(
+    fwd: ForwardBNNRegressor,
+    *,
+    n_components: int,
+    n_properties: int,
+) -> None:
+    """Forward checkpoint must accept composition dim and emit property dim."""
+
+    if int(fwd.input_dim) != int(n_components) or int(fwd.output_dim) != int(n_properties):
+        raise ValueError(
+            "Forward checkpoint dimensions do not match the GAN dataset: "
+            f"checkpoint input_dim={fwd.input_dim}, output_dim={fwd.output_dim}; "
+            f"GAN dataset has len(components)={n_components}, len(properties)={n_properties}."
         )
 
 
@@ -282,20 +323,27 @@ class DeterministicDiscriminator(nn.Module):
 # =============================================================================
 
 class GANTrainer:
-    """Trainer for GAN with Discriminator validation."""
+    """Train binary discriminator on concatenated composition + targets."""
 
     def __init__(
         self,
-        generator_fn,  # функция для генерации предсказаний
+        generator_fn,
+        config: GANStageConfig,
+        *,
+        generator_mode: str,
         component_bounds_lower: np.ndarray,
         component_bounds_upper: np.ndarray,
-        config: GANStageConfig,
+        property_bounds_lower: np.ndarray,
+        property_bounds_upper: np.ndarray,
         input_scaler: StandardScaler | None = None,
         device: str = "cuda" if torch.cuda.is_available() else "cpu",
-    ):
+    ) -> None:
         self.generator_fn = generator_fn
+        self.generator_mode = str(generator_mode).strip().lower()
         self.component_bounds_lower = torch.from_numpy(component_bounds_lower).float().to(device)
         self.component_bounds_upper = torch.from_numpy(component_bounds_upper).float().to(device)
+        self.property_bounds_lower = torch.from_numpy(property_bounds_lower).float().to(device)
+        self.property_bounds_upper = torch.from_numpy(property_bounds_upper).float().to(device)
         self.input_scaler = input_scaler
         if input_scaler is not None:
             self._scaler_mean = torch.from_numpy(np.asarray(input_scaler.mean, dtype=np.float32)).to(device)
@@ -306,7 +354,6 @@ class GANTrainer:
         self.config = config
         self.device = device
 
-        # Create discriminator
         input_size = len(config.component_columns) + len(config.property_columns)
         self.discriminator = DeterministicDiscriminator(
             input_size=input_size,
@@ -314,7 +361,6 @@ class GANTrainer:
             use_spectral_norm=config.use_spectral_norm,
         ).to(device)
 
-        # Optimizers
         self.d_optimizer = optim.Adam(
             self.discriminator.parameters(),
             lr=config.discriminator_learning_rate,
@@ -323,12 +369,16 @@ class GANTrainer:
 
         self.history: dict[str, list[float]] = {}
 
-    def _apply_constraints(self, components: torch.Tensor) -> torch.Tensor:
-        """Clip components to valid bounds."""
-        return torch.clamp(components, self.component_bounds_lower, self.component_bounds_upper)
+    def _clip_components(self, tensor: torch.Tensor) -> torch.Tensor:
+        """Clip compositions to observed dataset bounds."""
+        return torch.clamp(tensor, self.component_bounds_lower, self.component_bounds_upper)
+
+    def _clip_properties(self, tensor: torch.Tensor) -> torch.Tensor:
+        """Clip synthetic property predictions to observed dataset ranges."""
+        return torch.clamp(tensor, self.property_bounds_lower, self.property_bounds_upper)
 
     def _scale_input(self, combined: torch.Tensor) -> torch.Tensor:
-        """Standardize discriminator input (components, properties) so BCELoss does not saturate."""
+        """Standardize discriminator input so BCELoss does not saturate."""
         if self._scaler_mean is None:
             return combined
         return (combined - self._scaler_mean) / self._scaler_scale
@@ -385,22 +435,24 @@ class GANTrainer:
             "acc_fake": acc_fake.item(),
         }
 
+    def _postprocess_generator_outputs(self, tensor: torch.Tensor) -> torch.Tensor:
+        """Clip generator outputs (composition in inverse mode, properties in forward)."""
+        if self.generator_mode == "forward":
+            return self._clip_properties(tensor)
+        return self._clip_components(tensor)
+
     def train_epoch(
         self,
-        real_data: np.ndarray,
+        components: np.ndarray,
         properties: np.ndarray,
     ) -> dict:
-        """Train one epoch of GAN."""
-        
-        n_samples = len(real_data)
+        """Train discriminator for one epoch."""
+
+        n_samples = len(components)
         batch_size = self.config.batch_size
-        
-        # Create batches
+
         indices = np.random.permutation(n_samples)
-        batches = [
-            indices[i : i + batch_size]
-            for i in range(0, n_samples, batch_size)
-        ]
+        batches = [indices[i : i + batch_size] for i in range(0, n_samples, batch_size)]
 
         epoch_metrics = {
             "d_loss": [],
@@ -409,20 +461,21 @@ class GANTrainer:
         }
 
         for batch_idx in batches:
-            # Get batch
-            batch_real = torch.from_numpy(real_data[batch_idx]).float().to(self.device)
-            batch_props = torch.from_numpy(properties[batch_idx]).float().to(self.device)
+            batch_comp = torch.from_numpy(components[batch_idx]).float().to(self.device)
+            batch_prop = torch.from_numpy(properties[batch_idx]).float().to(self.device)
 
-            # Generate fake data using generator
             with torch.no_grad():
-                batch_fake = self.generator_fn(batch_props)
-                batch_fake = self._apply_constraints(batch_fake)
+                if self.generator_mode == "forward":
+                    batch_fake_targets = self.generator_fn(batch_comp)
+                    batch_fake_targets = self._postprocess_generator_outputs(batch_fake_targets)
+                    real_combined = self._scale_input(torch.cat([batch_comp, batch_prop], dim=1))
+                    fake_combined = self._scale_input(torch.cat([batch_comp, batch_fake_targets], dim=1))
+                else:
+                    batch_fake_comp = self.generator_fn(batch_prop)
+                    batch_fake_comp = self._postprocess_generator_outputs(batch_fake_comp)
+                    real_combined = self._scale_input(torch.cat([batch_comp, batch_prop], dim=1))
+                    fake_combined = self._scale_input(torch.cat([batch_fake_comp, batch_prop], dim=1))
 
-            # Combine and standardize: [components, properties]
-            real_combined = self._scale_input(torch.cat([batch_real, batch_props], dim=1))
-            fake_combined = self._scale_input(torch.cat([batch_fake, batch_props], dim=1))
-
-            # Train discriminator
             self.d_optimizer.zero_grad()
             d_loss, metrics = self._compute_discriminator_loss(real_combined, fake_combined)
             d_loss.backward()
@@ -432,25 +485,29 @@ class GANTrainer:
                 if key in epoch_metrics:
                     epoch_metrics[key].append(value)
 
-        # Average metrics
         return {key: np.mean(values) for key, values in epoch_metrics.items()}
 
     def evaluate(
         self,
-        real_data: np.ndarray,
+        components: np.ndarray,
         properties: np.ndarray,
     ) -> dict:
-        """Evaluate discriminator on validation set."""
-        
-        real_data = torch.from_numpy(real_data).float().to(self.device)
-        properties = torch.from_numpy(properties).float().to(self.device)
+        """Evaluate discriminator on a held-out split."""
+
+        batch_comp = torch.from_numpy(components).float().to(self.device)
+        batch_prop = torch.from_numpy(properties).float().to(self.device)
 
         with torch.no_grad():
-            fake_data = self.generator_fn(properties)
-            fake_data = self._apply_constraints(fake_data)
-
-            real_combined = self._scale_input(torch.cat([real_data, properties], dim=1))
-            fake_combined = self._scale_input(torch.cat([fake_data, properties], dim=1))
+            if self.generator_mode == "forward":
+                fake_prop = self.generator_fn(batch_comp)
+                fake_prop = self._postprocess_generator_outputs(fake_prop)
+                real_combined = self._scale_input(torch.cat([batch_comp, batch_prop], dim=1))
+                fake_combined = self._scale_input(torch.cat([batch_comp, fake_prop], dim=1))
+            else:
+                fake_comp = self.generator_fn(batch_prop)
+                fake_comp = self._postprocess_generator_outputs(fake_comp)
+                real_combined = self._scale_input(torch.cat([batch_comp, batch_prop], dim=1))
+                fake_combined = self._scale_input(torch.cat([fake_comp, batch_prop], dim=1))
 
             _, metrics = self._compute_discriminator_loss(real_combined, fake_combined)
 
@@ -477,7 +534,13 @@ def run_train_gan(
     bnn_dir: str | Path | None = None,
     gan_dir: str | Path | None = None,
 ) -> dict:
-    """Train a discriminator that separates real (composition, property) pairs from BNN predictions."""
+    """Train discriminator: real (composition, properties) vs generator outputs.
+
+    * generator_mode ``forward``: fake pairs share the same composition; properties
+      are predicted by ``ForwardBNNRegressor.load(forward_model_path)``.
+    * generator_mode ``inverse``: fake pairs share the same target properties;
+      composition comes from NEAT+BNN checkpoint under ``bnn_dir``.
+    """
 
     config = load_gan_config(config_path)
 
@@ -491,26 +554,14 @@ def run_train_gan(
     gan_artifacts = layout.gan_artifacts
     gan_artifacts.mkdir(parents=True, exist_ok=True)
 
-    manifest_path = layout.bnn_dir / "bnn_model_manifest.json"
-    if not manifest_path.exists():
-        raise FileNotFoundError(
-            f"Missing BNN manifest {manifest_path}. Run make_neat_to_bnn before train_gan."
-        )
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    _alignment_check(manifest, config.dataset)
-
-    model_path = layout.bnn_dir / config.bnn_model_filename
-    if not model_path.exists():
-        raise FileNotFoundError(
-            f"Missing trained BNN checkpoint {model_path}. Run make_neat_to_bnn first."
-        )
-
-    regressor = NeatBNNRegressor.load(model_path)
+    generator_mode = str(config.generator_mode).strip().lower()
 
     dataset = prepare_dataset(
         csv_path=config.dataset.data_path,
         component_columns=config.dataset.components,
         property_columns=config.dataset.properties,
+        component_aliases=config.dataset.component_aliases,
+        skiprows=config.dataset.skiprows,
     )
 
     seed = config.random_seed
@@ -523,9 +574,7 @@ def run_train_gan(
     n_samples = len(dataset.components)
     n_train = int(0.8 * n_samples)
     if n_train < 1 or n_train >= n_samples:
-        raise ValueError(
-            f"Need at least 2 rows for train/val split; got n_samples={n_samples}"
-        )
+        raise ValueError(f"Need at least 2 rows for train/val split; got n_samples={n_samples}")
 
     indices = rng.permutation(n_samples)
     train_idx = indices[:n_train]
@@ -544,25 +593,97 @@ def run_train_gan(
         [dataset.component_bounds[name][1] for name in config.dataset.components],
         dtype=float,
     )
+    prop_bounds_lower = np.array(
+        [dataset.property_ranges[name]["min"] for name in config.dataset.properties],
+        dtype=float,
+    )
+    prop_bounds_upper = np.array(
+        [dataset.property_ranges[name]["max"] for name in config.dataset.properties],
+        dtype=float,
+    )
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     mc_samples = max(1, int(config.generator_mc_samples))
 
-    # Standardize discriminator input on the train fold so BCELoss does not
-    # saturate (compositions ~1e2-1e3 kg/m^3, strength ~1e1 MPa).
     train_real_combined = np.concatenate([train_components, train_properties], axis=1)
     input_scaler = StandardScaler.fit(train_real_combined)
 
-    def generator_fn(properties_tensor: torch.Tensor) -> torch.Tensor:
-        props = properties_tensor.detach().cpu().numpy()
-        mean, _ = regressor.predict_components(props, mc_samples=mc_samples)
-        return torch.from_numpy(np.asarray(mean, dtype=np.float32)).to(device)
+    if generator_mode == "forward":
+        forward_path = Path(config.forward_model_path)
+        if not forward_path.exists():
+            raise FileNotFoundError(
+                f"Missing forward Bayesian checkpoint {forward_path}. "
+                "Train with: python main.py train_forward --config examples/forward_*.json"
+            )
+        forward_reg = ForwardBNNRegressor.load(forward_path)
+        _forward_dim_check(
+            forward_reg,
+            n_components=len(config.dataset.components),
+            n_properties=len(config.dataset.properties),
+        )
+
+        def generator_fn(components_tensor: torch.Tensor) -> torch.Tensor:
+            comp = components_tensor.detach().cpu().numpy()
+            mean_prop, _ = forward_reg.predict(comp, mc_samples=mc_samples)
+            return torch.from_numpy(np.asarray(mean_prop, dtype=np.float32)).to(device)
+
+        meta_generator = {
+            "generator_mode": "forward",
+            "forward_checkpoint": str(forward_path.resolve()),
+            "generator_mc_samples": mc_samples,
+            "dataset_components": list(config.dataset.components),
+            "dataset_properties": list(config.dataset.properties),
+            "inverse_bnn_manifest": None,
+            "inverse_bnn_checkpoint": None,
+        }
+
+    elif generator_mode == "inverse":
+        manifest_path = layout.bnn_dir / "bnn_model_manifest.json"
+        if not manifest_path.exists():
+            raise FileNotFoundError(
+                f"Missing BNN manifest {manifest_path}. Run make_neat_to_bnn before train_gan "
+                "(inverse generator_mode)."
+            )
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        _alignment_check(manifest, config.dataset)
+
+        model_path = layout.bnn_dir / config.bnn_model_filename
+        if not model_path.exists():
+            raise FileNotFoundError(
+                f"Missing trained BNN checkpoint {model_path}. Run make_neat_to_bnn first "
+                "(inverse generator_mode)."
+            )
+
+        inverse_reg = NeatBNNRegressor.load(model_path)
+
+        def generator_fn(properties_tensor: torch.Tensor) -> torch.Tensor:
+            props = properties_tensor.detach().cpu().numpy()
+            mean_comp, _ = inverse_reg.predict_components(props, mc_samples=mc_samples)
+            return torch.from_numpy(np.asarray(mean_comp, dtype=np.float32)).to(device)
+
+        meta_generator = {
+            "generator_mode": "inverse",
+            "forward_checkpoint": None,
+            "generator_mc_samples": mc_samples,
+            "inverse_bnn_manifest": str(manifest_path.resolve()),
+            "inverse_bnn_checkpoint": str(model_path.resolve()),
+            "manifest_input_names": list(manifest.get("input_names", [])),
+            "manifest_output_names": list(manifest.get("output_names", [])),
+            "dataset_components": list(config.dataset.components),
+            "dataset_properties": list(config.dataset.properties),
+        }
+
+    else:
+        raise ValueError(f"Unsupported generator_mode: {generator_mode}")
 
     trainer = GANTrainer(
         generator_fn=generator_fn,
+        config=config,
+        generator_mode=generator_mode,
         component_bounds_lower=bounds_lower,
         component_bounds_upper=bounds_upper,
-        config=config,
+        property_bounds_lower=prop_bounds_lower,
+        property_bounds_upper=prop_bounds_upper,
         input_scaler=input_scaler,
         device=device,
     )
@@ -586,27 +707,25 @@ def run_train_gan(
     torch.save(trainer.discriminator.state_dict(), gan_artifacts / "discriminator.pt")
 
     write_json(gan_artifacts / "input_scaler.json", input_scaler.to_dict())
-    write_json(
-        gan_artifacts / "gan_generator_meta.json",
-        {
-            "bnn_checkpoint": str(model_path.resolve()),
-            "generator_mc_samples": mc_samples,
-            "manifest": str(manifest_path.resolve()),
-            "input_scaler": "input_scaler.json",
-        },
-    )
+    meta_generator["input_scaler"] = "input_scaler.json"
+    write_json(gan_artifacts / "gan_generator_meta.json", meta_generator)
+
     write_json(gan_artifacts / "history.json", trainer.history)
 
     summary = {
         "status": "success",
         "num_epochs": config.num_epochs,
-        "bnn_model": str(model_path),
+        "generator_mode": generator_mode,
         "random_seed": int(seed),
         "final_d_loss": float(trainer.history["d_loss"][-1]),
         "final_acc_real": float(trainer.history["acc_real"][-1]),
         "final_acc_fake": float(trainer.history["acc_fake"][-1]),
         "artifacts_dir": str(gan_artifacts),
     }
+    if generator_mode == "forward":
+        summary["forward_model"] = str(Path(config.forward_model_path).resolve())
+    else:
+        summary["inverse_bnn_model"] = str((layout.bnn_dir / config.bnn_model_filename).resolve())
 
     write_json(gan_artifacts / "train_gan.json", summary)
 

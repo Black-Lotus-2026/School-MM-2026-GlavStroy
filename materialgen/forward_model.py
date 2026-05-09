@@ -11,14 +11,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 import numpy as np
 import pyro
 import pyro.distributions as dist
 import torch
 import torch.nn as nn
-from pyro.infer import SVI, Predictive, Trace_ELBO
+from pyro.infer import SVI, Trace_ELBO
 from pyro.infer.autoguide import AutoNormal
 from pyro.nn import PyroModule, PyroSample
 
@@ -102,6 +102,11 @@ class ForwardBNNRegressor:
     prior_std: float = 1.0
     seed: int = 42
     likelihood_scale: float = 1.0
+    # Rows per replay block during training-time eval (metrics / early stopping).
+    _TRAIN_PREDICT_CHUNK: ClassVar[int] = 128
+    # Public ``predict``: one row at a time avoids Pyro plate broadcast glitches when
+    # batch size differs from mc_samples (e.g. GAN validates 40 rows with mc_samples=16).
+    _PUBLIC_PREDICT_ROW_CHUNK: ClassVar[int] = 1
 
     def __post_init__(self) -> None:
         torch.manual_seed(self.seed)
@@ -179,9 +184,17 @@ class ForwardBNNRegressor:
                 yb = torch.from_numpy(y_e[start:stop])
                 svi.step(xb, yb)
 
-            train_pred, _ = self._predict_scaled(x_train, mc_samples=mc_samples)
+            train_pred, _ = self._predict_scaled(
+                x_train,
+                mc_samples=mc_samples,
+                max_rows_per_chunk=self._TRAIN_PREDICT_CHUNK,
+            )
             tr_loss = float(np.mean((train_pred - y_train) ** 2))
-            val_pred, _ = self._predict_scaled(x_val, mc_samples=mc_samples)
+            val_pred, _ = self._predict_scaled(
+                x_val,
+                mc_samples=mc_samples,
+                max_rows_per_chunk=self._TRAIN_PREDICT_CHUNK,
+            )
             v_loss = float(np.mean((val_pred - y_val) ** 2))
             train_losses.append(tr_loss)
             val_losses.append(v_loss)
@@ -205,15 +218,13 @@ class ForwardBNNRegressor:
             "best_val_loss": float(best_val),
         }
 
-    def _predict_scaled(
+    def _predict_scaled_core(
         self,
         x_scaled: np.ndarray,
         *,
         mc_samples: int,
     ) -> tuple[np.ndarray, np.ndarray]:
-        """Sample-by-sample MC prediction (avoids Predictive's parallel
-        broadcasting which conflicts with PyroSample-wrapped Linear weights).
-        """
+        """Sample-by-sample MC prediction for a contiguous row block."""
 
         x_tensor = torch.from_numpy(np.asarray(x_scaled, dtype=np.float32))
         outputs: list[np.ndarray] = []
@@ -226,6 +237,31 @@ class ForwardBNNRegressor:
         arr = np.stack(outputs, axis=0)
         return arr.mean(axis=0), arr.std(axis=0)
 
+    def _predict_scaled(
+        self,
+        x_scaled: np.ndarray,
+        *,
+        mc_samples: int,
+        max_rows_per_chunk: int | None = None,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """MC prediction over ``x_scaled``. Split rows so guide-replay batches stay small."""
+
+        if max_rows_per_chunk is None:
+            chunk = max(1, int(self._TRAIN_PREDICT_CHUNK))
+        else:
+            chunk = max(1, int(max_rows_per_chunk))
+        rows = np.asarray(x_scaled, dtype=np.float32)
+        if rows.shape[0] <= chunk:
+            return self._predict_scaled_core(rows, mc_samples=mc_samples)
+        chunk_means: list[np.ndarray] = []
+        chunk_stds: list[np.ndarray] = []
+        for start in range(0, rows.shape[0], chunk):
+            slab = rows[start : start + chunk]
+            m, s = self._predict_scaled_core(slab, mc_samples=mc_samples)
+            chunk_means.append(m)
+            chunk_stds.append(s)
+        return np.concatenate(chunk_means, axis=0), np.concatenate(chunk_stds, axis=0)
+
     def predict(
         self,
         x: np.ndarray,
@@ -235,7 +271,11 @@ class ForwardBNNRegressor:
         if self.x_scaler is None or self.y_scaler is None:
             raise RuntimeError("ForwardBNNRegressor must be fitted before predict")
         x_scaled = self.x_scaler.transform(np.asarray(x, dtype=np.float32))
-        mean_s, std_s = self._predict_scaled(x_scaled, mc_samples=mc_samples)
+        mean_s, std_s = self._predict_scaled(
+            x_scaled,
+            mc_samples=mc_samples,
+            max_rows_per_chunk=self._PUBLIC_PREDICT_ROW_CHUNK,
+        )
         mean = self.y_scaler.inverse_transform(mean_s)
         std = std_s * self.y_scaler.scale
         return mean, std

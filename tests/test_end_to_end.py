@@ -39,6 +39,7 @@ class CliSmokeTest(unittest.TestCase):
             "backward.json",
             "make_neat_to_bnn.json",
             "train_gan.json",
+            "train_gan_forward.json",
             "evaluate_metrics.json",
             "forward_normal.json",
             "forward_synthetic.json",

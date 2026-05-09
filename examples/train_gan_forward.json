@@ -1,0 +1,28 @@
+{
+  "generator_mode": "forward",
+  "forward_model_path": "../artifacts/train_forward/forward_bnn.pt",
+  "dataset": {
+    "data_path": "../data/synthetic_training_data.csv",
+    "components": [
+      "cement", "sand", "gravel", "water",
+      "plasticizer_kg", "fly_ash", "microsilica_kg",
+      "pm", "kmv", "mineral_powder", "mineral_additive",
+      "dolomite", "ak5", "ak6"
+    ],
+    "properties": ["strength_1", "strength_3", "strength_7", "strength_28"]
+  },
+  "discriminator_config": {
+    "limit_generations": 5,
+    "top_k": 2,
+    "seed": 42
+  },
+  "random_seed": 42,
+  "generator_mc_samples": 16,
+  "num_epochs": 20,
+  "batch_size": 16,
+  "discriminator_learning_rate": 0.001,
+  "generator_learning_rate": 0.0001,
+  "discriminator_hidden_layers": [128, 64],
+  "use_spectral_norm": false,
+  "label_smoothing": 0.0
+}

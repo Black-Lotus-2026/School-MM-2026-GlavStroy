@@ -41,6 +41,18 @@
   `gan_generator_meta.json` (ссылается на `bnn_model.pt` и манифест),
   `train_gan.json` (сводка).
 
+## 2б. GAN «как в ТЗ»: генератор состав → свойства
+
+- В `materialgen/train_gan.py` параметр `generator_mode`:
+  - **`forward`** — генератор = `ForwardBNNRegressor.load(forward_model_path)`;
+    подделка: тот же состав, свойства с заменой на MC-среднее предсказания forward-BNN;
+    манифест NEAT→BNN не требуется. Пример: `examples/train_gan_forward.json`.
+  - **`inverse`** (по умолчанию) — прежняя NEAT→BNN ветка для `examples/train_gan.json`.
+- `gan_generator_meta.json` хранит режим и путь к соответствующему чекпоинту.
+- `ForwardBNNRegressor.predict()` обрабатывает строки с `max_rows_per_chunk=1`,
+  чтобы инференс не ломался из-за Pyro `plate`/`broadcast` при больших батчах
+  (GAN валидирует весь val-фолд сразу).
+
 ## 3. Метрики кейса
 
 Добавлен модуль `materialgen/evaluate_metrics.py` и CLI-команда

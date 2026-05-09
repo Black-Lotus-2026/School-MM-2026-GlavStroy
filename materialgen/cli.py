@@ -48,7 +48,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     gan_parser = subparsers.add_parser(
         "train_gan",
-        help="Train GAN discriminator for validation of realism of predictions",
+        help="GAN discriminator vs frozen generator — inverse (NEAT→BNN) or forward (composition→properties, see generator_mode)",
     )
     gan_parser.add_argument("--config", required=True, help="Path to train_gan.json")
     gan_parser.add_argument("--artifacts-dir", default="artifacts", help="Root directory for all stage artifacts")
