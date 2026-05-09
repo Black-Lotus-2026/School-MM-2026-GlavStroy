@@ -1,26 +1,18 @@
 {
   "dataset": {
-    "data_path": "../data/boxcrete_data.csv",
-    "components": [
-      "Cement (kg/m3)",
-      "Slag (kg/m3)",
-      "Fly Ash (kg/m3)",
-      "Water (kg/m3)",
-      "MRWR (kg/m3)",
-      "Fine Aggregate (kg/m3)",
-      "Coarse Aggregates (kg/m3)"
-    ],
-    "properties": [
-      "strength(mean) (MPa)"
-    ]
+    "data_path": "../data/synthetic_training_data.csv",
+    "components": ["cement", "sand", "gravel", "water"],
+    "properties": ["strength_28"]
   },
   "discriminator_config": {
     "limit_generations": 5,
     "top_k": 2,
     "seed": 42
   },
-  "num_epochs": 100,
-  "batch_size": 32,
+  "random_seed": 42,
+  "generator_mc_samples": 24,
+  "num_epochs": 50,
+  "batch_size": 8,
   "discriminator_learning_rate": 0.001,
   "generator_learning_rate": 0.0001,
   "adversarial_weight": 1.0,
@@ -36,4 +28,3 @@
   "focal_loss_gamma": 2.0,
   "label_smoothing": 0.0
 }
-
