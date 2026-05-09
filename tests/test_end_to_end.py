@@ -27,6 +27,8 @@ class CliSmokeTest(unittest.TestCase):
                 "make_neat_to_bnn",
                 "train_gan",
                 "evaluate_metrics",
+                "train_forward",
+                "validate_gost",
             },
         )
 
@@ -38,6 +40,9 @@ class CliSmokeTest(unittest.TestCase):
             "make_neat_to_bnn.json",
             "train_gan.json",
             "evaluate_metrics.json",
+            "forward_normal.json",
+            "forward_synthetic.json",
+            "validate_gost.json",
         ):
             path = EXAMPLES / name
             self.assertTrue(path.exists(), f"missing example: {path}")

@@ -82,13 +82,34 @@
 
 ## Репозиторий: пайплайн MaterialGen
 
-Реализация в коде оформлена как цепочка стадий (артефакты по умолчанию в каталоге `artifacts/`):
+Реализация в коде оформлена как цепочка стадий (артефакты по умолчанию в каталоге `artifacts/`).
+
+### A. Инверсная ветка (свойства → состав, GAN-проверка реализма)
 
 1. **`train_neat`** — обратная NEAT: свойства → состав смеси (`examples/backward.json`).
 2. **`make_neat_to_bnn`** — конвертация генома NEAT в байесовскую сеть и дообучение (`examples/make_neat_to_bnn.json`), сохранение `bnn_model.pt` и манифеста.
 3. **`train_gan`** — дискриминатор отличает реальные пары *(состав, свойства)* от предсказаний замороженной BNN (`examples/train_gan.json`). Колонки в конфиге должны совпадать по порядку с манифестом стадии 2→3.
 4. **`evaluate_metrics`** — MAE, RMSE, MAPE, R² по отложенной доле данных для сохранённой BNN (`examples/evaluate_metrics.json`).
 
-Образец табличных данных для локальных прогонов: `data/synthetic_training_data.csv`. Установка зависимостей: `pip install -r requirements.txt`. Запуск из корня репозитория: `python main.py <команда> --config examples/....json`.
+### B. Прямая ветка (состав → прочность, основной полезный сигнал)
 
-Чтобы выполнить все четыре стадии подряд без ручного копирования команд: `python main_work.py` (см. `main_work.py`).
+5. **`train_forward`** — байесовская MLP `состав → прочность(и)` со встроенной оценкой MAE/RMSE/MAPE/R² на отложенном фолде. На `data/Normal_Concrete_DB.csv` (2412 строк, 9 фич → CS_28d) даёт **val R²≈0.88**, наравне со sklearn RF/GBR. На `data/synthetic_training_data.csv` с multi-output (`strength_1/_3/_7/_28`) — **val R²≈0.97**, MAPE≈1.9%. Конфиги: `examples/forward_normal.json`, `examples/forward_synthetic.json`.
+6. **`validate_gost`** — пост-валидация: предсказания forward-модели сопоставляются с диапазонами марок ГОСТ 26633 (`data/ГОСТы.csv`) и считается доля точных и ±1 совпадений по марке (`examples/validate_gost.json`). На Normal_Concrete_DB — exact 58%, within ±1 brand 92.5%.
+
+### Запуск
+
+Установка: `pip install -r requirements.txt`. Все команды — из корня:
+
+```bash
+python main.py train_neat        --config examples/backward.json
+python main.py make_neat_to_bnn  --config examples/make_neat_to_bnn.json
+python main.py train_gan         --config examples/train_gan.json
+python main.py evaluate_metrics  --config examples/evaluate_metrics.json
+python main.py train_forward     --config examples/forward_normal.json
+python main.py validate_gost     --config examples/validate_gost.json
+python main.py train_forward     --config examples/forward_synthetic.json   # multi-output bonus
+```
+
+Для дымовых прогонов есть `examples/*_smoke.json`. Чтобы выполнить четыре стадии инверсной ветки одной командой: `python main_work.py`.
+
+Подробные числа и интерпретация — в `REPORT.md`, журнал доработок — в `CHANGES.md`.
