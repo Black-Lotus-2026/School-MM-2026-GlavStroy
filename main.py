@@ -1,7 +1,9 @@
 """Точка входа в MaterialGen.
 
-    python3 main.py train_neat       --config examples/backward.json
-    python3 main.py make_neat_to_bnn --config examples/make_neat_to_bnn.json
+ python3 main.py train_neat          --config examples/backward.json
+ python3 main.py make_neat_to_bnn    --config examples/make_neat_to_bnn.json
+ python3 main.py train_gan           --config examples/train_gan.json
+ python3 main.py evaluate_metrics    --config examples/evaluate_metrics.json
 """
 
 from materialgen.cli import main
