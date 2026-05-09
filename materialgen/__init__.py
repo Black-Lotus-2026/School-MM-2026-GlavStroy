@@ -18,6 +18,7 @@ __all__ = [
     "run_train_forward",
     "run_train_gan",
     "run_train_neat",
+    "run_validate_gost",
 ]
 
 _LAZY = {
@@ -26,6 +27,7 @@ _LAZY = {
     "run_train_forward": ("train_forward", "run_train_forward"),
     "run_train_gan": ("train_gan", "run_train_gan"),
     "run_train_neat": ("train_neat", "run_train_neat"),
+    "run_validate_gost": ("validate_gost", "run_validate_gost"),
 }
 
 

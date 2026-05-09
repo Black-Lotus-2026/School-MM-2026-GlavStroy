@@ -211,16 +211,19 @@ class ForwardBNNRegressor:
         *,
         mc_samples: int,
     ) -> tuple[np.ndarray, np.ndarray]:
+        """Sample-by-sample MC prediction (avoids Predictive's parallel
+        broadcasting which conflicts with PyroSample-wrapped Linear weights).
+        """
+
         x_tensor = torch.from_numpy(np.asarray(x_scaled, dtype=np.float32))
-        predictive = Predictive(
-            self.model,
-            guide=self.guide,
-            num_samples=int(mc_samples),
-            return_sites=["_RETURN"],
-        )
+        outputs: list[np.ndarray] = []
         with torch.no_grad():
-            samples = predictive(x_tensor)["_RETURN"]
-        arr = samples.cpu().numpy()
+            for _ in range(int(mc_samples)):
+                guide_trace = pyro.poutine.trace(self.guide).get_trace(x_tensor)
+                replayed = pyro.poutine.replay(self.model, trace=guide_trace)
+                mean = replayed(x_tensor)
+                outputs.append(mean.cpu().numpy())
+        arr = np.stack(outputs, axis=0)
         return arr.mean(axis=0), arr.std(axis=0)
 
     def predict(

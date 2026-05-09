@@ -9,6 +9,7 @@ from .make_neat_to_bnn import run_make_neat_to_bnn
 from .train_forward import run_train_forward
 from .train_neat import run_train_neat
 from .train_gan import run_train_gan
+from .validate_gost import run_validate_gost
 
 
 def _write_payload(payload: str, output_path: str | None) -> None:
@@ -71,6 +72,15 @@ def _build_parser() -> argparse.ArgumentParser:
     fwd_parser.add_argument("--forward-dir", default=None, help="Optional override for the train_forward folder")
     fwd_parser.add_argument("--output", default=None, help="Optional path for JSON summary")
 
+    gost_parser = subparsers.add_parser(
+        "validate_gost",
+        help="Score forward predictions against GOST 26633 strength brands",
+    )
+    gost_parser.add_argument("--config", required=True, help="Path to validate_gost.json")
+    gost_parser.add_argument("--artifacts-dir", default="artifacts", help="Root artifacts directory")
+    gost_parser.add_argument("--out-dir", default=None, help="Optional override for the validate_gost folder")
+    gost_parser.add_argument("--output", default=None, help="Optional path for JSON summary")
+
     return parser
 
 
@@ -122,6 +132,16 @@ def _handle_train_forward(args) -> int:
     return 0
 
 
+def _handle_validate_gost(args) -> int:
+    summary = run_validate_gost(
+        config_path=args.config,
+        artifacts_dir=args.artifacts_dir,
+        out_dir=args.out_dir,
+    )
+    _write_payload(json.dumps(summary, ensure_ascii=False, indent=2), args.output)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
@@ -132,6 +152,7 @@ def main(argv: list[str] | None = None) -> int:
         "train_gan": _handle_train_gan,
         "evaluate_metrics": _handle_evaluate_metrics,
         "train_forward": _handle_train_forward,
+        "validate_gost": _handle_validate_gost,
     }
     handler = handlers.get(args.command)
     if handler is None:
